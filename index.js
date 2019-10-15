@@ -325,9 +325,9 @@ function generateImage (opt, callback) {
   const baseline = font.tables.os2.sTypoAscender * (fontSize / font.unitsPerEm);
   const pad = distanceRange >> 1;
   let width = Math.round(bBox.x2 - bBox.x1) + pad + pad;
-  let height = Math.round(bBox.y2 - bBox.y1) + pad + pad;
+  let height = fontSize + pad + pad;
   let xOffset = Math.round(-bBox.x1) + pad;
-  let yOffset = Math.round(-bBox.y1) + pad;
+  let yOffset = fontSize - pad - pad;
   if (roundDecimal != null) {
     xOffset = utils.roundNumber(xOffset, roundDecimal);
     yOffset = utils.roundNumber(yOffset, roundDecimal);
@@ -375,7 +375,7 @@ function generateImage (opt, callback) {
           width: width,
           height: height,
           xoffset: Math.round(bBox.x1) - pad,
-          yoffset: Math.round(bBox.y1) + pad + baseline,
+          yoffset: pad,
           xadvance: glyph.advanceWidth * scale,
           chnl: 15
         }

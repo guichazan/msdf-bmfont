@@ -1,29 +1,60 @@
+const utils = require('./lib/utils');
+const reshaper = require('arabic-persian-reshaper');
 const opentype = require('opentype.js');
 const exec = require('child_process').exec;
 const mapLimit = require('map-limit');
-const MultiBinPacker = require('multi-bin-packer');
-const Canvas = require('canvas');
+const MaxRectsPacker = require('maxrects-packer').MaxRectsPacker;
 const path = require('path');
+const ProgressBar = require('cli-progress');
+const fs = require('fs');
+const buffer = require('buffer').Buffer;
+const Jimp = require('jimp');
+const readline = require('readline');
 
 const defaultCharset = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~".split('');
+const controlChars = ['\n', '\r', '\t'];
 
 const binaryLookup = {
   darwin: 'msdfgen.osx',
-  win32: 'msdfgen.exe'
+  win32: 'msdfgen.exe',
+  linux: 'msdfgen.linux'
 };
 
 module.exports = generateBMFont;
 
+/**
+ * Creates a BMFont compatible bitmap font of signed distance fields from a font file
+ *
+ * @param {string} fontPath - Path to the input ttf/otf/woff font 
+ * @param {Object} opt - Options object for generating bitmap font (Optional) :
+ *            outputType : font file format Avaliable: xml(default), json
+ *            filename : filename of both font file and font textures
+ *            fontSize : font size for generated textures (default 42)
+ *            charset : charset in generated font, could be array or string (default is Western)
+ *            textureWidth : Width of generated textures (default 512)
+ *            textureHeight : Height of generated textures (default 512)
+ *            distanceRange : distance range for computing signed distance field
+ *            fieldType : "msdf"(default), "sdf", "psdf"
+ *            roundDecimal  : rounded digits of the output font file. (Defaut is null)
+ *            smartSize : shrink atlas to the smallest possible square (Default: false)
+ *            pot : atlas size shall be power of 2 (Default: false)
+ *            square : atlas size shall be square (Default: false)
+ *            rot : allow 90-degree rotation while packing (Default: false)
+ *            rtl : use RTL charators fix (Default: false)
+ * @param {function(string, Array.<Object>, Object)} callback - Callback funtion(err, textures, font) 
+ *
+ */
 function generateBMFont (fontPath, opt, callback) {
   const binName = binaryLookup[process.platform];
   if (binName === undefined) {
     throw new Error(`No msdfgen binary for platform ${process.platform}.`);
   }
-  const binaryPath = path.join(__dirname, 'bin', binName);
+  const binaryPath = path.join(__dirname, 'bin', process.platform, binName);
 
   if (!fontPath || typeof fontPath !== 'string') {
     throw new TypeError('must specify a font path');
   }
+  let fontDir = path.dirname(fontPath); // Set fallback output path to font path
   if (typeof opt === 'function') {
     callback = opt;
     opt = {};
@@ -34,28 +65,98 @@ function generateBMFont (fontPath, opt, callback) {
   if (!callback) {
     throw new TypeError('missing callback');
   }
+  if (opt.textureSize && opt.textureSize.length !== 2) {
+    console.error('textureSize format shall be: width,height');
+    process.exit(1);
+  }
 
   callback = callback || function () {};
   opt = opt || {};
-  let charset = (typeof opt.charset === 'string' ? opt.charset.split('') : opt.charset) || defaultCharset;
-  const fontSize = opt.fontSize || 42;
-  const textureWidth = opt.textureWidth || 512;
-  const textureHeight = opt.textureHeight || 512;
-  const texturePadding = opt.texturePadding || 2;
-  const distanceRange = opt.distanceRange || 3;
-  const fieldType = opt.fieldType || 'msdf';
+  // const reuse = (typeof opt.reuse === 'boolean' || typeof opt.reuse === 'undefined') ? {} : opt.reuse.opt;
+  let reuse, cfg = {};
+  if (typeof opt.reuse !== 'undefined' && typeof opt.reuse !== 'boolean') {
+    if (!fs.existsSync(opt.reuse)) {
+      console.log('Creating cfg file :' + opt.reuse);
+      reuse = {};
+    } else {
+      console.log('Loading cfg file :' + opt.reuse);
+      cfg = JSON.parse(fs.readFileSync(opt.reuse, 'utf8'));
+      reuse = cfg.opt;
+    }
+  } else reuse = {};
+  const outputType = opt.outputType = utils.valueQueue([opt.outputType, reuse.outputType, "xml"]);
+  let filename = utils.valueQueue([opt.filename, reuse.filename]);
+  const fontSize = opt.fontSize = utils.valueQueue([opt.fontSize, reuse.fontSize, 42]);
+  const fontSpacing = opt.fontSpacing = utils.valueQueue([opt.fontSpacing, reuse.fontSpacing, [0, 0]]);
+  const fontPadding = opt.fontPadding = utils.valueQueue([opt.fontPadding, reuse.fontPadding, [0, 0, 0, 0]]);
+  const textureWidth = opt.textureWidth = utils.valueQueue([opt.textureSize || reuse.textureSize, [512, 512]])[0];
+  const textureHeight = opt.textureHeight = utils.valueQueue([opt.textureSize || reuse.textureSize, [512, 512]])[1];
+  const texturePadding = opt.texturePadding = utils.valueQueue([opt.texturePadding, reuse.texturePadding, 1]);
+  const border = opt.border = utils.valueQueue([opt.border, reuse.border, 0]);
+  const distanceRange = opt.distanceRange = utils.valueQueue([opt.distanceRange, reuse.distanceRange, 4]);
+  const fieldType = opt.fieldType = utils.valueQueue([opt.fieldType, reuse.fieldType, 'msdf']);
+  const roundDecimal = opt.roundDecimal = utils.valueQueue([opt.roundDecimal, reuse.roundDecimal]); // if no roudDecimal option, left null as-is
+  const smartSize = opt.smartSize = utils.valueQueue([opt.smartSize, reuse.smartSize, false]);
+  const pot = opt.pot = utils.valueQueue([opt.pot, reuse.pot, false]);
+  const square = opt.square = utils.valueQueue([opt.square, reuse.square, false]);
+  const debug = opt.vector || false;
+  const tolerance = opt.tolerance = utils.valueQueue([opt.tolerance, reuse.tolerance, 0]);
+  const isRTL = opt.rtl = utils.valueQueue([opt.rtl, reuse.rtl, false]);
+  const allowRotation = opt.rot = utils.valueQueue([opt.rot, reuse.rot, false]);
+  if (isRTL) opt.charset = require('arabic-persian-reshaper').convertArabic(opt.charset);
+  let charset = opt.charset = (typeof opt.charset === 'string' ? Array.from(opt.charset) : opt.charset) || reuse.charset || defaultCharset;
+
+  // TODO: Validate options
   if (fieldType !== 'msdf' && fieldType !== 'sdf' && fieldType !== 'psdf') {
     throw new TypeError('fieldType must be one of msdf, sdf, or psdf');
   }
 
   const font = opentype.loadSync(fontPath);
-  if (font.outlinesFormat !== 'truetype') {
-    throw new TypeError('must specify a truetype font');
+  if (font.outlinesFormat !== 'truetype' && font.outlinesFormat !== 'cff') {
+    throw new TypeError('must specify a truetype font (ttf, otf, woff)');
   }
-  const canvas = new Canvas(textureWidth, textureHeight);
-  const context = canvas.getContext('2d');
-  const packer = new MultiBinPacker(textureWidth, textureHeight, texturePadding);
+  const packer = new MaxRectsPacker(textureWidth, textureHeight, texturePadding, {
+    smart: smartSize,
+    pot: pot,
+    square: square,
+    allowRotation: allowRotation,
+    tag: false,
+    border: border
+  });
   const chars = [];
+  
+  charset = charset.filter((e, i, self) => {
+    return (i == self.indexOf(e)) && (!controlChars.includes(e));
+  }); // Remove duplicate & control chars
+
+  const os2 = font.tables.os2;
+  const baseline = os2.sTypoAscender * (fontSize / font.unitsPerEm) + (distanceRange >> 1);
+  const fontface = path.basename(fontPath, path.extname(fontPath));
+  if(!filename) {
+    filename = fontface;
+    console.log(`Use font-face as filename : ${filename}`);
+  } else {
+    if (opt.filename) fontDir = path.dirname(opt.filename);
+    filename = opt.filename = path.basename(filename, path.extname(filename));
+  }
+
+  // Initialize settings
+  let settings = {};
+  settings.opt = JSON.parse(JSON.stringify(opt));
+  delete settings.opt['reuse']; // prune previous settings
+  let pages = [];
+  if (cfg.packer !== undefined) {
+    pages = cfg.pages;
+    packer.load(cfg.packer.bins);
+  }
+
+  let bar;
+  bar = new ProgressBar.Bar({
+    format: "Generating {percentage}%|{bar}| ({value}/{total}) {duration}s",
+    clearOnComplete: true
+  }, ProgressBar.Presets.shades_classic); 
+  bar.start(charset.length, 0);
+
   mapLimit(charset, 15, (char, cb) => {
     generateImage({
       binaryPath,
@@ -63,23 +164,50 @@ function generateBMFont (fontPath, opt, callback) {
       char,
       fontSize,
       fieldType,
-      distanceRange
+      distanceRange,
+      roundDecimal,
+      debug,
+      tolerance
     }, (err, res) => {
       if (err) return cb(err);
+      bar.increment();
       cb(null, res);
     });
-  }, (err, results) => {
+  }, async (err, results) => {
     if (err) callback(err);
+    bar.stop();
+
     packer.addArray(results);
-    const textures = packer.bins.map((bin, index) => {
-      context.fillStyle = '#ffffff';
-      context.fillRect(0, 0, canvas.width, canvas.height);
-      if (opt.transparent) {
-        context.clearRect(0, 0, canvas.width, canvas.height);
+    const textures = packer.bins.map(async (bin, index) => {
+      let svg = "";
+      let texname = "";
+      let fillColor = fieldType === "msdf" ? 0x000000ff : 0x00000000;
+      let img = new Jimp(bin.width, bin.height, fillColor);
+      if (index > pages.length - 1) { 
+        if (packer.bins.length > 1) texname = `${filename}.${index}`;
+        else texname = filename; 
+        pages.push(`${texname}.png`);
+      } else {
+        texname = path.basename(pages[index], path.extname(pages[index]));
+        let imgPath = path.join(fontDir, `${texname}.png`);
+        console.log('Loading previous image : ', imgPath);
+        const loader = Jimp.read(imgPath);
+        loader.catch(err => {
+          console.warn("File read error: ", err);
+        });
+        img = await loader;
       }
       bin.rects.forEach(rect => {
         if (rect.data.imageData) {
-          context.putImageData(rect.data.imageData, rect.x, rect.y);
+          if (rect.rot) {
+            rect.data.imageData.rotate(90);
+          }
+          img.composite(rect.data.imageData, rect.x, rect.y);
+          if (debug) {
+            const x_woffset = rect.x - rect.data.fontData.xoffset + (distanceRange >> 1);
+            const y_woffset = rect.y - rect.data.fontData.yoffset + baseline + (distanceRange >> 1);
+            svg += font.charToGlyph(rect.data.fontData.char).getPath(x_woffset, y_woffset, fontSize).toSVG() + "\n";
+          }
         }
         const charData = rect.data.fontData;
         charData.x = rect.x;
@@ -87,8 +215,17 @@ function generateBMFont (fontPath, opt, callback) {
         charData.page = index;
         chars.push(rect.data.fontData);
       });
-      return canvas.toBuffer();
+      const buffer = await img.getBufferAsync(Jimp.MIME_PNG);
+      let tex = {
+        filename: path.join(fontDir, texname),
+        texture: buffer 
+      }
+      if (debug) tex.svg = svg;
+      return tex;
     });
+
+    const asyncTextures = await Promise.all(textures);
+
     const kernings = [];
     charset.forEach(first => {
       charset.forEach(second => {
@@ -103,13 +240,11 @@ function generateBMFont (fontPath, opt, callback) {
       });
     });
 
-    const os2 = font.tables.os2;
-    const name = font.tables.name.fullName;
     const fontData = {
-      pages: [],
+      pages,
       chars,
       info: {
-        face: name[Object.getOwnPropertyNames(name)[0]],
+        face: fontface,
         size: fontSize,
         bold: 0,
         italic: 0,
@@ -118,14 +253,14 @@ function generateBMFont (fontPath, opt, callback) {
         stretchH: 100,
         smooth: 1,
         aa: 1,
-        padding: [0, 0, 0, 0],
-        spacing: [texturePadding, texturePadding]
+        padding: fontPadding,
+        spacing: fontSpacing
       },
       common: {
         lineHeight: (os2.sTypoAscender - os2.sTypoDescender + os2.sTypoLineGap) * (fontSize / font.unitsPerEm),
-        base: font.ascender * (fontSize / font.unitsPerEm),
-        scaleW: textureWidth,
-        scaleH: textureHeight,
+        base: baseline,
+        scaleW: packer.bins[0].width,
+        scaleH: packer.bins[0].height,
         pages: packer.bins.length,
         packed: 0,
         alphaChnl: 0,
@@ -133,24 +268,36 @@ function generateBMFont (fontPath, opt, callback) {
         greenChnl: 0,
         blueChnl: 0
       },
+      distanceField: {
+        fieldType: fieldType,
+        distanceRange: distanceRange
+      },
       kernings: kernings
     };
-    callback(null, textures, fontData);
+    if(roundDecimal !== null) utils.roundAllValue(fontData, roundDecimal, true);
+    let fontFile = {};
+    const ext = outputType === "json" ? `.json` : `.fnt`;
+    fontFile.filename = path.join(fontDir, fontface + ext);
+    fontFile.data = utils.stringify(fontData, outputType);
+
+    // Store pages name and available packer freeRects in settings
+    settings.pages = pages;
+    settings.packer = {};
+    settings.packer.bins = packer.save(); 
+    fontFile.settings = settings;
+
+    console.log("\nGeneration complete!\n");
+    callback(null, asyncTextures, fontFile);
   });
 }
 
 function generateImage (opt, callback) {
-  const {binaryPath, font, char, fontSize, fieldType, distanceRange} = opt;
+  const {binaryPath, font, char, fontSize, fieldType, distanceRange, roundDecimal, debug, tolerance} = opt;
   const glyph = font.charToGlyph(char);
   const commands = glyph.getPath(0, 0, fontSize).commands;
   let contours = [];
   let currentContour = [];
-  let bBox = {
-    left: 0,
-    bottom: 0,
-    right: 0,
-    top: 0
-  };
+  const bBox = glyph.getPath(0, 0, fontSize).getBoundingBox();
   commands.forEach(command => {
     if (command.type === 'M') { // new contour
       if (currentContour.length > 0) {
@@ -162,49 +309,30 @@ function generateImage (opt, callback) {
   });
   contours.push(currentContour);
 
-  let shapeDesc = '';
-  let firstCommand = true;
-  contours.forEach(contour => {
-    shapeDesc += '{';
-    const lastIndex = contour.length - 1;
-    contour.forEach((command, index) => {
-      if (command.type === 'Z') {
-        // shapeDesc += `${contour[0].x}, ${contour[0].y}`;
-        // adding the last point breaks it??!??!
-      } else {
-        if (command.type === 'C') {
-          shapeDesc += `(${command.x1}, ${command.y1}; ${command.x2}, ${command.y2}); `;
-        } else if (command.type === 'Q') {
-          shapeDesc += `(${command.x1}, ${command.y1}); `;
-        }
-        shapeDesc += `${command.x}, ${command.y}`;
-        if (firstCommand) {
-          bBox.left = command.x;
-          bBox.bottom = command.y;
-          bBox.right = command.x;
-          bBox.top = command.y;
-          firstCommand = false;
-        } else {
-          bBox.left = Math.min(bBox.left, command.x);
-          bBox.bottom = Math.min(bBox.bottom, command.y);
-          bBox.right = Math.max(bBox.right, command.x);
-          bBox.top = Math.max(bBox.top, command.y);
-        }
-      }
-      if (index !== lastIndex) {
-        shapeDesc += '; ';
-      }
-    });
-    shapeDesc += '}';
-  });
+  if (tolerance != 0) {
+    utils.setTolerance(tolerance, tolerance * 10);
+    let numFiltered = utils.filterContours(contours);
+    if (numFiltered && debug)
+      console.log(`\n${char} removed ${numFiltered} small contour(s)`);
+    // let numReversed = utils.alignClockwise(contours, false);
+    // if (numReversed && debug)
+    //   console.log(`${char} found ${numReversed}/${contours.length} reversed contour(s)`);
+  }
+  let shapeDesc = utils.stringifyContours(contours);
+
   if (contours.some(cont => cont.length === 1)) console.log('length is 1, failed to normalize glyph');
   const scale = fontSize / font.unitsPerEm;
-  const baseline = font.ascender * (fontSize / font.unitsPerEm);
-  const pad = 5;
-  let width = Math.round(bBox.right - bBox.left) + pad + pad;
-  let height = Math.round(bBox.top - bBox.bottom) + pad + pad;
-  let yOffset = -bBox.bottom + pad;
-  let command = `${binaryPath} ${fieldType} -format text -stdout -size ${width} ${height} -translate ${pad} ${yOffset} -pxrange ${distanceRange} -defineshape "${shapeDesc}"`;
+  const baseline = font.tables.os2.sTypoAscender * (fontSize / font.unitsPerEm);
+  const pad = distanceRange >> 1;
+  let width = Math.round(bBox.x2 - bBox.x1) + pad + pad;
+  let height = Math.round(bBox.y2 - bBox.y1) + pad + pad;
+  let xOffset = Math.round(-bBox.x1) + pad;
+  let yOffset = Math.round(-bBox.y1) + pad;
+  if (roundDecimal != null) {
+    xOffset = utils.roundNumber(xOffset, roundDecimal);
+    yOffset = utils.roundNumber(yOffset, roundDecimal);
+  }
+  let command = `${binaryPath} ${fieldType} -format text -stdout -size ${width} ${height} -translate ${xOffset} ${yOffset} -pxrange ${distanceRange} -defineshape "${shapeDesc}"`;
 
   exec(command, (err, stdout, stderr) => {
     if (err) return callback(err);
@@ -223,28 +351,31 @@ function generateImage (opt, callback) {
       }
     } else {
       for (let i = 0; i < rawImageData.length; i += channelCount) {
-        pixels.push(rawImageData[i], rawImageData[i], rawImageData[i], 255); // make monochrome w/ alpha
+        pixels.push(rawImageData[i], rawImageData[i], rawImageData[i], rawImageData[i]); // make monochrome w/ alpha
       }
     }
     let imageData;
     if (isNaN(channelCount) || !rawImageData.some(x => x !== 0)) { // if character is blank
-      console.warn(`no bitmap for character '${char}' (${char.charCodeAt(0)}), adding to font as empty`);
-      console.warn(command);
-      console.warn('---');
+      readline.clearLine(process.stdout);
+      readline.cursorTo(process.stdout, 0);
+      console.log(`Warning: no bitmap for character '${char}' (${char.charCodeAt(0)}), adding to font as empty`);
       width = 0;
       height = 0;
     } else {
-      imageData = new Canvas.ImageData(new Uint8ClampedArray(pixels), width, height);
+      const buffer = new Uint8ClampedArray(pixels);
+      imageData = new Jimp({data: buffer, width: width, height: height});
     }
     const container = {
       data: {
         imageData,
         fontData: {
           id: char.charCodeAt(0),
+          index: glyph.index,
+          char: String(char),
           width: width,
           height: height,
-          xoffset: 0,
-          yoffset: bBox.bottom - pad + baseline,
+          xoffset: Math.round(bBox.x1) - pad,
+          yoffset: Math.round(bBox.y1) + pad + baseline,
           xadvance: glyph.advanceWidth * scale,
           chnl: 15
         }
@@ -255,3 +386,4 @@ function generateImage (opt, callback) {
     callback(null, container);
   });
 }
+

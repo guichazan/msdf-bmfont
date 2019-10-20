@@ -257,7 +257,7 @@ function generateBMFont (fontPath, opt, callback) {
         spacing: fontSpacing
       },
       common: {
-        lineHeight: (os2.sTypoAscender - os2.sTypoDescender + os2.sTypoLineGap) * (fontSize / font.unitsPerEm),
+        lineHeight: (os2.sTypoAscender - os2.sTypoDescender*2 + os2.sTypoLineGap) * (fontSize / font.unitsPerEm),
         base: baseline,
         scaleW: packer.bins[0].width,
         scaleH: packer.bins[0].height,
@@ -322,19 +322,29 @@ function generateImage (opt, callback) {
 
   if (contours.some(cont => cont.length === 1)) console.log('length is 1, failed to normalize glyph');
   const scale = fontSize / font.unitsPerEm;
-  const baseline = font.tables.os2.sTypoAscender * (fontSize / font.unitsPerEm);
-  const bottomLine = - font.tables.os2.sTypoDescender * (fontSize / font.unitsPerEm);
+  const baseline = font.tables.os2.sTypoAscender * scale;
+  const bottomLine = - font.tables.os2.sTypoDescender * scale;
   const pad = distanceRange >> 1;
   let width = Math.round(bBox.x2 - bBox.x1) + pad + pad;
-  let height = fontSize + pad + pad;
-  let xOffset = Math.round(-bBox.x1) + pad;
-  let yOffset = fontSize - bottomLine;
+  let height = fontSize + Math.round(bottomLine);
+  let xOffset = Math.round(-bBox.x1 + pad);
+  let yOffset = fontSize-1;
   if (roundDecimal != null) {
     xOffset = utils.roundNumber(xOffset, roundDecimal);
     yOffset = utils.roundNumber(yOffset, roundDecimal);
   }
-  let command = `${binaryPath} ${fieldType} -format text -stdout -size ${width} ${height} -translate ${xOffset} ${yOffset} -pxrange ${distanceRange} -defineshape "${shapeDesc}"`;
 
+  if (shapeDesc.length > 8000) // limitation for cmd
+  {
+     shapeDesc = "{}";
+/*     shapeDesc = shapeDesc.slice(0,4000);
+     let idx = shapeDesc.lastIndexOf(");");
+     idx = shapeDesc.indexOf(";", idx+3);
+     shapeDesc = shapeDesc.slice(0, idx)+";}";*/
+  }
+  
+  let command = `${binaryPath} ${fieldType} -format text -stdout -size ${width} ${height} -translate ${xOffset} ${yOffset} -pxrange ${distanceRange} -defineshape "${shapeDesc}"`;
+ 
   exec(command, (err, stdout, stderr) => {
     if (err) return callback(err);
     const rawImageData = stdout.match(/([0-9a-fA-F]+)/g).map(str => parseInt(str, 16)); // split on every number, parse from hex
@@ -376,7 +386,7 @@ function generateImage (opt, callback) {
           width: width,
           height: height,
           xoffset: Math.round(bBox.x1) - pad,
-          yoffset: pad,
+          yoffset: Math.round(bottomLine) + pad ,
           xadvance: glyph.advanceWidth * scale,
           chnl: 15
         }
@@ -387,4 +397,3 @@ function generateImage (opt, callback) {
     callback(null, container);
   });
 }
-

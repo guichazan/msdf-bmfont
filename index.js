@@ -98,14 +98,13 @@ function generateBMFont (fontPath, opt, callback) {
   const roundDecimal = opt.roundDecimal = utils.valueQueue([opt.roundDecimal, reuse.roundDecimal]); // if no roudDecimal option, left null as-is
   const smartSize = opt.smartSize = utils.valueQueue([opt.smartSize, reuse.smartSize, false]);
   const pot = opt.pot = utils.valueQueue([opt.pot, reuse.pot, false]);
-  const square = opt.square = utils.valueQueue([opt.square, reuse.square, false]);
+  const square = opt.square = utils.valueQueue([opt.square, reuse.square, true]);
   const debug = opt.vector || false;
   const tolerance = opt.tolerance = utils.valueQueue([opt.tolerance, reuse.tolerance, 0]);
   const isRTL = opt.rtl = utils.valueQueue([opt.rtl, reuse.rtl, false]);
   const allowRotation = opt.rot = utils.valueQueue([opt.rot, reuse.rot, false]);
   if (isRTL) opt.charset = require('arabic-persian-reshaper').convertArabic(opt.charset);
   let charset = opt.charset = (typeof opt.charset === 'string' ? Array.from(opt.charset) : opt.charset) || reuse.charset || defaultCharset;
-
   // TODO: Validate options
   if (fieldType !== 'msdf' && fieldType !== 'sdf' && fieldType !== 'psdf') {
     throw new TypeError('fieldType must be one of msdf, sdf, or psdf');
@@ -115,7 +114,7 @@ function generateBMFont (fontPath, opt, callback) {
   if (font.outlinesFormat !== 'truetype' && font.outlinesFormat !== 'cff') {
     throw new TypeError('must specify a truetype font (ttf, otf, woff)');
   }
-  const packer = new MaxRectsPacker(textureWidth, textureHeight, texturePadding, {
+  const packer = new MaxRectsPacker(textureWidth, textureHeight, Number(texturePadding), { // Number from https://github.com/damienmortini/msdf-bmfont-xml/commit/d1a0fbe5a1cd70a0a569a742cbd649b0545d3f6f
     smart: smartSize,
     pot: pot,
     square: square,
@@ -124,7 +123,7 @@ function generateBMFont (fontPath, opt, callback) {
     border: border
   });
   const chars = [];
-  
+
   charset = charset.filter((e, i, self) => {
     return (i == self.indexOf(e)) && (!controlChars.includes(e));
   }); // Remove duplicate & control chars
@@ -132,6 +131,7 @@ function generateBMFont (fontPath, opt, callback) {
   const os2 = font.tables.os2;
   const baseline = os2.sTypoAscender * (fontSize / font.unitsPerEm) + (distanceRange >> 1);
   const fontface = path.basename(fontPath, path.extname(fontPath));
+console.log(`${fontSize}, ${os2.sTypoAscender * (fontSize / font.unitsPerEm)}, ${os2.sTypoDescender * (fontSize / font.unitsPerEm)}, ${os2.sTypoLineGap * (fontSize / font.unitsPerEm)}`);
   if(!filename) {
     filename = fontface;
     console.log(`Use font-face as filename : ${filename}`);
@@ -141,7 +141,10 @@ function generateBMFont (fontPath, opt, callback) {
   }
 
   // Initialize settings
-  let settings = {};
+  global.fontAscent=0;
+  global.fontDescent=0;
+  global.bottomLine=0;
+  var settings = {};
   settings.opt = JSON.parse(JSON.stringify(opt));
   delete settings.opt['reuse']; // prune previous settings
   let pages = [];
@@ -154,7 +157,7 @@ function generateBMFont (fontPath, opt, callback) {
   bar = new ProgressBar.Bar({
     format: "Generating {percentage}%|{bar}| ({value}/{total}) {duration}s",
     clearOnComplete: true
-  }, ProgressBar.Presets.shades_classic); 
+  }, ProgressBar.Presets.shades_classic);
   bar.start(charset.length, 0);
 
   mapLimit(charset, 15, (char, cb) => {
@@ -183,9 +186,9 @@ function generateBMFont (fontPath, opt, callback) {
       let texname = "";
       let fillColor = fieldType === "msdf" ? 0x000000ff : 0x00000000;
       let img = new Jimp(bin.width, bin.height, fillColor);
-      if (index > pages.length - 1) { 
+      if (index > pages.length - 1) {
         if (packer.bins.length > 1) texname = `${filename}.${index}`;
-        else texname = filename; 
+        else texname = filename;
         pages.push(`${texname}.png`);
       } else {
         texname = path.basename(pages[index], path.extname(pages[index]));
@@ -218,7 +221,7 @@ function generateBMFont (fontPath, opt, callback) {
       const buffer = await img.getBufferAsync(Jimp.MIME_PNG);
       let tex = {
         filename: path.join(fontDir, texname),
-        texture: buffer 
+        texture: buffer
       }
       if (debug) tex.svg = svg;
       return tex;
@@ -257,8 +260,8 @@ function generateBMFont (fontPath, opt, callback) {
         spacing: fontSpacing
       },
       common: {
-        lineHeight: (os2.sTypoAscender - os2.sTypoDescender*2 + os2.sTypoLineGap) * (fontSize / font.unitsPerEm),
-        base: baseline,
+        lineHeight: fontAscent - fontDescent + (distanceRange >> 1), 
+        base: fontAscent,
         scaleW: packer.bins[0].width,
         scaleH: packer.bins[0].height,
         pages: packer.bins.length,
@@ -283,15 +286,16 @@ function generateBMFont (fontPath, opt, callback) {
     // Store pages name and available packer freeRects in settings
     settings.pages = pages;
     settings.packer = {};
-    settings.packer.bins = packer.save(); 
+    settings.packer.bins = packer.save();
     fontFile.settings = settings;
 
     console.log("\nGeneration complete!\n");
     callback(null, asyncTextures, fontFile);
   });
-}
+} 
 
-function generateImage (opt, callback) {
+var first=true;
+function generateImage (opt, callback) { // https://github.com/opentypejs/opentype.js/blob/master/README.md
   const {binaryPath, font, char, fontSize, fieldType, distanceRange, roundDecimal, debug, tolerance} = opt;
   const glyph = font.charToGlyph(char);
   const commands = glyph.getPath(0, 0, fontSize).commands;
@@ -319,11 +323,11 @@ function generateImage (opt, callback) {
     //   console.log(`${char} found ${numReversed}/${contours.length} reversed contour(s)`);
   }
   let shapeDesc = utils.stringifyContours(contours);
-
+  
   if (contours.some(cont => cont.length === 1)) console.log('length is 1, failed to normalize glyph');
   const scale = fontSize / font.unitsPerEm;
-  const baseline = font.tables.os2.sTypoAscender * scale;
-  const bottomLine = - font.tables.os2.sTypoDescender * scale;
+  const baseline = font.ascender * scale;
+  const bottomLine = - font.descender * scale;
   const pad = distanceRange >> 1;
   let width = Math.round(bBox.x2 - bBox.x1) + pad + pad;
   let height = fontSize + Math.round(bottomLine);
@@ -333,9 +337,14 @@ function generateImage (opt, callback) {
     xOffset = utils.roundNumber(xOffset, roundDecimal);
     yOffset = utils.roundNumber(yOffset, roundDecimal);
   }
+  fontAscent = font.ascender *scale;
+  fontDescent = font.descender *scale;
+  if (first) {first=false; console.log(`pad: ${pad} ascent: ${fontAscent} descent: ${fontDescent}`);}
+//  console.log(`${char} (${char.charCodeAt(0)}) ${bBox.y1} ${bBox.y2} (${bBox.y2-bBox.y1})`);
 
   if (shapeDesc.length > 8000) // limitation for cmd
   {
+     console.log(`Commandline greater than 8000 chars for char ${char} (${char.charCodeAt(0)}): ${shapeDesc.length}`);
      shapeDesc = "{}";
 /*     shapeDesc = shapeDesc.slice(0,4000);
      let idx = shapeDesc.lastIndexOf(");");
@@ -385,8 +394,8 @@ function generateImage (opt, callback) {
           char: String(char),
           width: width,
           height: height,
-          xoffset: Math.round(bBox.x1) - pad,
-          yoffset: Math.round(bottomLine) + pad ,
+          xoffset: Math.round(bBox.x1) + pad,
+          yoffset: - (Math.round(bottomLine) + pad), // guich: the original implementation set this as positive
           xadvance: glyph.advanceWidth * scale,
           chnl: 15
         }

@@ -400,8 +400,8 @@ function generateImage (opt, callback) { // https://github.com/opentypejs/openty
           chnl: 15
         }
       },
-      width: width,
-      height: height
+      width: width+2,
+      height: height+2
     };
     callback(null, container);
   });

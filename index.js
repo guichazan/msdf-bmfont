@@ -333,6 +333,7 @@ function generateImage (opt, callback) { // https://github.com/opentypejs/openty
   let height = fontSize + Math.round(bottomLine);
   let xOffset = Math.round(-bBox.x1 + pad);
   let yOffset = fontSize-1;
+  if (char=='t' || char=='j') {console.log("increased"); xOffset-=4; width+=8;} // hack
   if (roundDecimal != null) {
     xOffset = utils.roundNumber(xOffset, roundDecimal);
     yOffset = utils.roundNumber(yOffset, roundDecimal);
